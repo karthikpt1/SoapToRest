@@ -26,24 +26,19 @@ def zeep_type_to_json_schema(zeep_type):
     if not zeep_type:
         return {"type": "object", "properties": {}}
 
-    # Extract children and attributes
     elements = getattr(zeep_type, 'elements', [])
     attributes = getattr(zeep_type, 'attributes', [])
 
-    # CASE A: PURE PRIMITIVE
     if not elements and not attributes:
         return map_xsd_to_json_type(zeep_type)
 
-    # CASE B: COMPLEX TYPE
     properties = {}
     required = []
 
     try:
-        # 1. Map XML Attributes
         for attr_name, attr_obj in attributes:
             properties[attr_name] = map_xsd_to_json_type(attr_obj.type)
 
-        # 2. Map Child Elements
         for name, element in elements:
             child_schema = zeep_type_to_json_schema(element.type)
 
@@ -55,7 +50,6 @@ def zeep_type_to_json_schema(zeep_type):
             if element.min_occurs and int(element.min_occurs) > 0:
                 required.append(name)
         
-        # 3. SimpleContent Handle
         if attributes and not elements:
             properties["_value"] = {"type": "string", "description": "The text content of the element"}
 
@@ -72,23 +66,39 @@ def zeep_type_to_json_schema(zeep_type):
 if 'step' not in st.session_state:
     st.session_state.step = 'upload'
 if 'op_data' not in st.session_state:
-    st.session_state.op_data = {}  # Stores parsed operations
+    st.session_state.op_data = {}
 if 'final_spec' not in st.session_state:
     st.session_state.final_spec = None
+if 'wsdl_service_name' not in st.session_state:
+    st.session_state.wsdl_service_name = "Restructured REST API"
+if 'error_schema' not in st.session_state:
+    st.session_state.error_schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "example": "ERROR_CODE"},
+            "message": {"type": "string", "example": "A human-readable description of the error."}
+        }
+    }
 
 def restart_process():
     st.session_state.step = 'upload'
     st.session_state.op_data = {}
     st.session_state.final_spec = None
+    st.session_state.wsdl_service_name = "Restructured REST API"
+    st.session_state.error_schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "example": "ERROR_CODE"},
+            "message": {"type": "string", "example": "A human-readable description of the error."}
+        }
+    }
 
 # --- 3. STREAMLIT UI ---
 
 st.set_page_config(page_title="WSDL to Swagger Pro", layout="wide")
 
-# Sidebar for all inputs
 with st.sidebar:
     st.header("⚙️ Utility Configuration")
-    
     if st.button("🔄 Start New Project"):
         restart_process()
         st.rerun()
@@ -105,7 +115,6 @@ with st.sidebar:
 if uploaded_files and st.session_state.step == 'upload':
     temp_dir = tempfile.mkdtemp()
     wsdl_files = []
-    
     for f in uploaded_files:
         path = os.path.join(temp_dir, f.name)
         with open(path, "wb") as buffer:
@@ -117,30 +126,26 @@ if uploaded_files and st.session_state.step == 'upload':
         st.warning("⚠️ No .wsdl file detected. Please upload at least one WSDL.")
     else:
         main_wsdl = st.selectbox("Select Main WSDL Entry Point:", wsdl_files)
-        
         if st.button("Parse Operations & Design Schema"):
             try:
                 main_path = os.path.join(temp_dir, main_wsdl)
                 client = Client(main_path)
-                
                 extracted_ops = {}
                 for service in client.wsdl.services.values():
+                    st.session_state.wsdl_service_name = service.name
                     for port in service.ports.values():
                         for op in port.binding._operations.values():
                             req_type = op.input.body.type if op.input and op.input.body else None
                             res_type = op.output.body.type if op.output and op.output.body else None
-                            
                             extracted_ops[op.name] = {
                                 "request": zeep_type_to_json_schema(req_type),
                                 "response": zeep_type_to_json_schema(res_type),
                                 "include": True,
                                 "tag": service.name
                             }
-                
                 st.session_state.op_data = extracted_ops
                 st.session_state.step = 'edit'
                 st.rerun()
-                
             except Exception as e:
                 st.error(f"🚨 Processing Error: {e}")
             finally:
@@ -149,25 +154,35 @@ if uploaded_files and st.session_state.step == 'upload':
 # --- STEP 2: INTERMEDIATE EDITING ---
 elif st.session_state.step == 'edit':
     st.header("🛠️ Step 2: Refine API Operations")
-    st.info("Edit the JSON schemas below to add/remove elements. Uncheck 'Include' to exclude an operation from the final Swagger.")
+    
+    with st.expander("⚠️ Global Error Response (500) Configuration"):
+        err_json_str = st.text_area("Edit 500 Error JSON Schema", 
+                                    value=json.dumps(st.session_state.error_schema, indent=2), 
+                                    height=150)
+        try:
+            st.session_state.error_schema = json.loads(err_json_str)
+            error_valid = True
+        except:
+            st.error("Invalid Global Error JSON")
+            error_valid = False
+
+    st.info("Edit the JSON schemas below. Uncheck 'Include' to exclude an operation. Errors will prevent generation.")
     
     current_data = st.session_state.op_data
     updated_data = {}
+    is_valid_json = True
 
     for op_name, info in current_data.items():
         with st.expander(f"Operation: {op_name}", expanded=True):
             col_inc, col_req, col_res = st.columns([1, 4, 4])
-            
             with col_inc:
                 is_included = st.checkbox("Include", value=info['include'], key=f"check_{op_name}")
-            
             with col_req:
                 st.markdown("**Request Schema**")
-                req_json = st.text_area("JSON", value=json.dumps(info['request'], indent=2), height=250, key=f"req_{op_name}", label_visibility="collapsed")
-            
+                req_json = st.text_area("JSON Req", value=json.dumps(info['request'], indent=2), height=250, key=f"req_{op_name}", label_visibility="collapsed")
             with col_res:
                 st.markdown("**Response Schema**")
-                res_json = st.text_area("JSON", value=json.dumps(info['response'], indent=2), height=250, key=f"res_{op_name}", label_visibility="collapsed")
+                res_json = st.text_area("JSON Res", value=json.dumps(info['response'], indent=2), height=250, key=f"res_{op_name}", label_visibility="collapsed")
             
             try:
                 updated_data[op_name] = {
@@ -178,16 +193,16 @@ elif st.session_state.step == 'edit':
                 }
             except Exception as e:
                 st.error(f"Error in {op_name} JSON: {e}")
+                is_valid_json = False
                 updated_data[op_name] = info
 
-    if st.button("Generate Swagger UI 🚀"):
-        # Construct Final OpenAPI Spec
+    if st.button("Generate Swagger UI 🚀", disabled=not (is_valid_json and error_valid)):
         openapi_spec = {
             "openapi": "3.0.0",
             "info": {
-                "title": "Restructured REST API", 
+                "title": st.session_state.wsdl_service_name, 
                 "version": "1.0.0",
-                "description": "Auto-generated REST facade from SOAP WSDL."
+                "description": f"Auto-generated REST facade from {st.session_state.wsdl_service_name} SOAP WSDL."
             },
             "paths": {}
         }
@@ -205,11 +220,14 @@ elif st.session_state.step == 'edit':
                             "200": {
                                 "description": "Success",
                                 "content": {"application/json": {"schema": data['response']}}
+                            },
+                            "500": {
+                                "description": "Internal Server Error",
+                                "content": {"application/json": {"schema": st.session_state.error_schema}}
                             }
                         }
                     }
                 }
-        
         st.session_state.final_spec = openapi_spec
         st.session_state.step = 'visualize'
         st.rerun()
@@ -217,16 +235,22 @@ elif st.session_state.step == 'edit':
 # --- STEP 3: FINAL VISUALIZATION ---
 elif st.session_state.step == 'visualize':
     st.header("✨ Step 3: Final API Design")
-    
     if st.button("⬅️ Back to Editor"):
         st.session_state.step = 'edit'
         st.rerun()
 
     json_spec = json.dumps(st.session_state.final_spec, indent=2)
     st.sidebar.subheader("💾 Export Results")
-    st.sidebar.download_button("Download OpenAPI JSON", json_spec, "swagger.json", mime="application/json")
+    
+    # Updated Download Button logic
+    service_name = st.session_state.wsdl_service_name
+    st.sidebar.download_button(
+        label=f"Download {service_name} JSON", 
+        data=json_spec, 
+        file_name=f"{service_name}.json", 
+        mime="application/json"
+    )
 
-    # --- Full Width Swagger UI (Original Styling) ---
     st.components.v1.html(f"""
         <div id="swagger-ui"></div>
         <script src="https://unpkg.com/swagger-ui-dist@3/swagger-ui-bundle.js"></script>
@@ -254,7 +278,6 @@ elif st.session_state.step == 'visualize':
         </script>
     """, height=1000, scrolling=True)
 
-# --- INITIAL INFO SCREEN ---
 else:
     st.info("👈 **Welcome! Please upload your WSDL and any associated XSD files in the sidebar to begin.**")
     st.markdown("""
